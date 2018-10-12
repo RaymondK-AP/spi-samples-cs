@@ -1,4 +1,5 @@
 ﻿using System;
+using System.IO;
 using System.Reflection;
 using SPIClient;
 
@@ -30,7 +31,7 @@ namespace KebabPos
         private string _posId = "KEBABPOS1";
         private string _eftposAddress = "192.168.1.1";
         private Secrets _spiSecrets = null;
-
+        private TransactionOptions _options;
         private string _version = Assembly.GetEntryAssembly().GetName().Version.ToString();
 
         private void Start()
@@ -38,11 +39,32 @@ namespace KebabPos
             log.Info("Starting KebabPos...");
             LoadPersistedState();
 
-            _spi = new Spi(_posId, _eftposAddress, _spiSecrets); // It is ok to not have the secrets yet to start with.
+            try
+            {
+                _spi = new Spi(_posId, _eftposAddress, _spiSecrets); // It is ok to not have the secrets yet to start with.
+                _spi.SetPosInfo("assembly", "2.4.5");
+                _options = new TransactionOptions();
+                _options.SetCustomerReceiptHeader("");
+                _options.SetCustomerReceiptFooter("");
+                _options.SetMerchantReceiptHeader("");
+                _options.SetMerchantReceiptFooter("");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
+                Console.Write("> ");
+                Console.ReadLine();
+                return;
+            }
+
             _spi.StatusChanged += OnSpiStatusChanged;
             _spi.PairingFlowStateChanged += OnPairingFlowStateChanged;
             _spi.SecretsChanged += OnSecretsChanged;
             _spi.TxFlowStateChanged += OnTxFlowStateChanged;
+
+            _spi.PrintingResponse = HandlePrintingResponse;
+            _spi.TerminalStatusResponse = HandleTerminalStatusResponse;
+            _spi.BatteryLevelChanged = HandleBatteryLevelChanged;
             _spi.Start();
 
             Console.Clear();
@@ -83,6 +105,49 @@ namespace KebabPos
         {
             Console.Clear();
             Console.WriteLine($"# --> SPI Status Changed: {status.SpiStatus}");
+            PrintStatusAndActions();
+            Console.Write("> ");
+        }
+
+        private void HandlePrintingResponse(Message message)
+        {
+            Console.Clear();
+            var printingResponse = new PrintingResponse(message);
+
+            if (printingResponse.IsSuccess())
+            {
+                Console.WriteLine($"# --> Printing Response: Printing Receipt successful");
+            }
+            else
+            {
+                Console.WriteLine($"# --> Printing Response:  Printing Receipt failed: reason = " + printingResponse.GetErrorReason() + ", detail = " + printingResponse.GetErrorDetail());
+            }
+
+            _spi.AckFlowEndedAndBackToIdle();
+            PrintStatusAndActions();
+            Console.Write("> ");
+        }
+
+        private void HandleTerminalStatusResponse(Message message)
+        {
+            Console.Clear();
+            var terminalStatusResponse = new TerminalStatusResponse(message);
+            Console.WriteLine($"# Terminal Status Response #");
+            Console.WriteLine($"# Status: " + terminalStatusResponse.GetStatus());
+            Console.WriteLine($"# Battery Level: " + terminalStatusResponse.GetBatteryLevel() + "%");
+            Console.WriteLine($"# Charging: " + terminalStatusResponse.IsCharging());
+            _spi.AckFlowEndedAndBackToIdle();
+            PrintStatusAndActions();
+            Console.Write("> ");
+        }
+
+        private void HandleBatteryLevelChanged(Message message)
+        {
+            Console.Clear();
+            var terminalBattery = new TerminalBattery(message);
+            Console.WriteLine($"# Battery Level Changed #");
+            Console.WriteLine($"# Battery Level: " + terminalBattery.BatteryLevel + "%");
+            _spi.AckFlowEndedAndBackToIdle();
             PrintStatusAndActions();
             Console.Write("> ");
         }
@@ -199,7 +264,7 @@ namespace KebabPos
 
                     break;
                 case Message.SuccessState.Failed:
-                    Console.WriteLine($"# WE DID NOT GET PAID :(");                    
+                    Console.WriteLine($"# WE DID NOT GET PAID :(");
                     if (txState.Response != null)
                     {
                         purchaseResponse = new PurchaseResponse(txState.Response);
@@ -241,7 +306,7 @@ namespace KebabPos
                     Console.WriteLine("# REFUNDED AMOUNT: {0}", refundResponse.GetRefundAmount());
                     break;
                 case Message.SuccessState.Failed:
-                    Console.WriteLine($"# REFUND FAILED!");                    
+                    Console.WriteLine($"# REFUND FAILED!");
                     if (txState.Response != null)
                     {
                         refundResponse = new RefundResponse(txState.Response);
@@ -280,14 +345,15 @@ namespace KebabPos
                     Console.WriteLine("# CASHOUT: {0}", cashoutResponse.GetCashoutAmount());
                     Console.WriteLine("# BANKED NON-CASH AMOUNT: {0}", cashoutResponse.GetBankNonCashAmount());
                     Console.WriteLine("# BANKED CASH AMOUNT: {0}", cashoutResponse.GetBankCashAmount());
+                    Console.WriteLine("# SURCHARGE: {0}", cashoutResponse.GetSurchargeAmount());
                     break;
                 case Message.SuccessState.Failed:
-                    Console.WriteLine($"# CASHOUT FAILED!");                    
+                    Console.WriteLine($"# CASHOUT FAILED!");
                     if (txState.Response != null)
                     {
                         cashoutResponse = new CashoutOnlyResponse(txState.Response);
                         Console.WriteLine("# Error: {0}", txState.Response.GetError());
-                        Console.WriteLine("# Error Detail: {0}", txState.Response.GetErrorDetail());                        
+                        Console.WriteLine("# Error Detail: {0}", txState.Response.GetErrorDetail());
                         Console.WriteLine("# Response: {0}", cashoutResponse.GetResponseText());
                         Console.WriteLine("# RRN: {0}", cashoutResponse.GetRRN());
                         Console.WriteLine("# Scheme: {0}", cashoutResponse.SchemeName);
@@ -324,6 +390,7 @@ namespace KebabPos
                     Console.WriteLine("# PURCHASE: {0}", purchaseResponse.GetPurchaseAmount());
                     Console.WriteLine("# BANKED NON-CASH AMOUNT: {0}", purchaseResponse.GetBankNonCashAmount());
                     Console.WriteLine("# BANKED CASH AMOUNT: {0}", purchaseResponse.GetBankCashAmount());
+                    Console.WriteLine("# SURCHARGE: {0}", purchaseResponse.GetSurchargeAmount());
                     break;
                 case Message.SuccessState.Failed:
                     Console.WriteLine($"# WE DID NOT GET MOTO-PAID :(");
@@ -332,7 +399,7 @@ namespace KebabPos
                         motoResponse = new MotoPurchaseResponse(txState.Response);
                         purchaseResponse = motoResponse.PurchaseResponse;
                         Console.WriteLine("# Error: {0}", txState.Response.GetError());
-                        Console.WriteLine("# Error Detail: {0}", txState.Response.GetErrorDetail());                        
+                        Console.WriteLine("# Error Detail: {0}", txState.Response.GetErrorDetail());
                         Console.WriteLine("# Response: {0}", purchaseResponse.GetResponseText());
                         Console.WriteLine("# RRN: {0}", purchaseResponse.GetRRN());
                         Console.WriteLine("# Scheme: {0}", purchaseResponse.SchemeName);
@@ -356,14 +423,17 @@ namespace KebabPos
             {
                 var gltResponse = new GetLastTransactionResponse(txState.Response);
 
-                if (_lastCmd.Length > 1) {
+                if (_lastCmd.Length > 1)
+                {
                     // User specified that he intended to retrieve a specific tx by pos_ref_id
                     // This is how you can use a handy function to match it.
                     var success = _spi.GltMatch(gltResponse, _lastCmd[1]);
                     if (success == Message.SuccessState.Unknown)
                     {
                         Console.WriteLine("# Did not retrieve Expected Transaction. Here is what we got:");
-                    } else {
+                    }
+                    else
+                    {
                         Console.WriteLine("# Tx Matched Expected Purchase Request.");
                     }
                 }
@@ -487,9 +557,9 @@ namespace KebabPos
             if (_spi.CurrentFlow == SpiFlow.Idle)
             {
                 Console.WriteLine("# [kebab:1200:100:500:false] - [kebab:price:tip:cashout:promptForCash] Charge for kebab with extras!");
-                Console.WriteLine("# [13kebab:1300] - MOTO - Accept Payment Over the phone");
-                Console.WriteLine("# [yuck:500] - hand out a refund of $5.00!");
-                Console.WriteLine("# [cashout:5000] - do a cashout only transaction");
+                Console.WriteLine("# [13kebab:1300] - [kebab:price] MOTO - Accept Payment Over the phone");
+                Console.WriteLine("# [yuck:500] - [yuck:price] hand out a refund of $5.00!");
+                Console.WriteLine("# [cashout:5000] - [cashout:price] do a cashout only transaction");
                 Console.WriteLine("# [settle] - Initiate Settlement");
                 Console.WriteLine("# [settle_enq] - Settlment Enquiry");
                 Console.WriteLine("#");
@@ -498,18 +568,23 @@ namespace KebabPos
                 Console.WriteLine("#");
                 Console.WriteLine("# [rcpt_from_eftpos:true] - Offer Customer Receipt From Eftpos");
                 Console.WriteLine("# [sig_flow_from_eftpos:true] - Signature Flow to be handled by Eftpos");
+                Console.WriteLine("# [print_merchant_copy:true] - add printing of footers and headers onto the existing EFTPOS receipt provided by payment application");
+                Console.WriteLine("# [receipt_header:myheader] - set header for the receipt");
+                Console.WriteLine("# [receipt_footer:myfooter] - set footer for the receipt");
+                Console.WriteLine("# [print:posvendor_key:payload] - print the free form receipt with SHA256 format posvendor key and payload");
+                Console.WriteLine("# [terminal_status] -get terminal status - battery level - charging");
                 Console.WriteLine("#");
             }
 
             if (_spi.CurrentStatus == SpiStatus.Unpaired && _spi.CurrentFlow == SpiFlow.Idle)
             {
                 Console.WriteLine("# [pos_id:CITYKEBAB1] - Set the POS ID");
-            }            
+            }
 
             if (_spi.CurrentStatus == SpiStatus.Unpaired || _spi.CurrentStatus == SpiStatus.PairedConnecting)
             {
                 if (!IsUnknownStatus())
-                    Console.WriteLine("# [eftpos_address:10.161.104.104] - Set the EFTPOS ADDRESS");                
+                    Console.WriteLine("# [eftpos_address:10.161.104.104] - Set the EFTPOS ADDRESS");
             }
 
             if (_spi.CurrentStatus == SpiStatus.Unpaired && _spi.CurrentFlow == SpiFlow.Idle)
@@ -553,8 +628,8 @@ namespace KebabPos
                 }
 
                 if (!txState.Finished && !txState.AttemptingToCancel)
-                    Console.WriteLine("# [tx_cancel] - Attempt to Cancel Tx");                
-                
+                    Console.WriteLine("# [tx_cancel] - Attempt to Cancel Tx");
+
                 if (txState.Finished && txState.Success != Message.SuccessState.Unknown)
                     Console.WriteLine("# [ok] - acknowledge final");
             }
@@ -592,9 +667,19 @@ namespace KebabPos
             var bye = false;
             while (!bye)
             {
+                //Inrease buffer length
+                byte[] inputBuffer = new byte[1024];
+                Stream inputStream = Console.OpenStandardInput(inputBuffer.Length);
+                Console.SetIn(new StreamReader(inputStream, Console.InputEncoding, false, inputBuffer.Length));
                 var input = Console.ReadLine();
+
                 if (string.IsNullOrEmpty(input)) { Console.Write("> "); continue; }
                 var spInput = input.Split(':');
+                if (spInput[0].ToLower() == "print")
+                {
+                    spInput = input.Split(new char[] { ':' }, 3);
+                }
+
                 _lastCmd = spInput;
                 try
                 {
@@ -628,11 +713,11 @@ namespace KebabPos
                     break;
                 case "cashout":
                     _retryCmd = spInput;
-                    DoCashout();                    
+                    DoCashout();
                     break;
                 case "13kebab":
                     _retryCmd = spInput;
-                    DoMoto();                    
+                    DoMoto();
                     break;
 
                 case "pos_id":
@@ -713,12 +798,45 @@ namespace KebabPos
                     }
                     break;
 
-
                 case "rcpt_from_eftpos":
                     _spi.Config.PromptForCustomerCopyOnEftpos = spInput[1].ToLower() == "true";
                     break;
                 case "sig_flow_from_eftpos":
                     _spi.Config.SignatureFlowOnEftpos = spInput[1].ToLower() == "true";
+                    break;
+
+                case "print_merchant_copy":
+                    _spi.Config.PrintMerchantCopy = spInput[1].ToLower() == "true";
+                    Console.Clear();
+                    _spi.AckFlowEndedAndBackToIdle();
+                    PrintStatusAndActions();
+                    Console.Write("> ");
+                    break;
+
+                case "receipt_header":
+                    _options.SetCustomerReceiptHeader(SanitizePrintText(spInput[1]));
+                    _options.SetMerchantReceiptHeader(SanitizePrintText(spInput[1]));
+                    Console.Clear();
+                    _spi.AckFlowEndedAndBackToIdle();
+                    PrintStatusAndActions();
+                    Console.Write("> ");
+                    break;
+
+                case "receipt_footer":
+                    _options.SetCustomerReceiptFooter(SanitizePrintText(spInput[1]));
+                    _options.SetMerchantReceiptFooter(SanitizePrintText(spInput[1]));
+                    Console.Clear();
+                    _spi.AckFlowEndedAndBackToIdle();
+                    PrintStatusAndActions();
+                    Console.Write("> ");
+                    break;
+
+                case "print":
+                    _spi.PrintReceipt(spInput[1], SanitizePrintText(spInput[2]));
+                    break;
+
+                case "terminal_status":
+                    _spi.GetTerminalStatus();
                     break;
 
                 case "ok":
@@ -762,7 +880,7 @@ namespace KebabPos
                     {
                         DoCashout();
                     }
-                    else if(_spi.CurrentTxFlowState.Type == TransactionType.MOTO)
+                    else if (_spi.CurrentTxFlowState.Type == TransactionType.MOTO)
                     {
                         DoMoto();
                     }
@@ -832,11 +950,11 @@ namespace KebabPos
             // posRefId is what you would usually use to identify the order in your own system.
             var posRefId = "kebab-" + DateTime.Now.ToString("dd-MM-yyyy-HH-mm-ss");
 
-            var pres = _spi.InitiatePurchaseTxV2(posRefId, int.Parse(_retryCmd[1]), tipAmount, cashoutAmount, promptForCashout);
+            var pres = _spi.InitiatePurchaseTxV2(posRefId, int.Parse(_retryCmd[1]), tipAmount, cashoutAmount, promptForCashout, _options);
             if (!pres.Initiated)
             {
                 Console.WriteLine($"# Could not initiate purchase: {pres.Message}. Please Retry.");
-            }            
+            }
         }
 
         private void LoadPersistedState()
@@ -853,7 +971,15 @@ namespace KebabPos
             _spiSecrets = new Secrets(argSplit[2], argSplit[3]);
         }
 
-        private string[] _retryCmd = { };        
+        private string SanitizePrintText(string printText)
+        {
+            printText = printText.Replace(@"\\emphasis", @"\emphasis");
+            printText = printText.Replace(@"\\clear", @"\clear");
+            printText = printText.Replace(@"\r\n", Environment.NewLine);
+            return printText.Replace(@"\n", Environment.NewLine);
+        }
+
+        private string[] _retryCmd = { };
         private string[] _lastCmd = { };
         private static readonly log4net.ILog log = log4net.LogManager.GetLogger("spi");
     }
